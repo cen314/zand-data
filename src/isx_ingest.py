@@ -152,7 +152,7 @@ def isc_already_ingested_ids(sb) -> set[int]:
     res = sb.schema("market").from_("isx_sessions") \
         .select("isc_report_id") \
         .eq("source", "ISC") \
-        .not_("isc_report_id", "is", None) \
+        .filter("isc_report_id", "not.is", "null") \
         .execute()
     return {row["isc_report_id"] for row in (res.data or [])}
 
@@ -189,14 +189,21 @@ def seed_companies(sb) -> int:
                 "sector":           ISC_MARKET_NAMES.get(co.get("market")),
                 "isc_company_id":   co.get("id"),
                 "capital_iqd":      co.get("capital"),
-                "est_date":         co.get("estdate") or None,
+                "est_date":         co.get("estdate") if co.get("estdate") and not co.get("estdate", "").startswith("0000") else None,
                 "is_active":        not bool(co.get("hidecompany") or co.get("hideallcompany")),
             })
         if rows:
+            # Deduplicate within the batch — API occasionally returns duplicate tickers
+            seen_tickers: set[str] = set()
+            unique_rows = []
+            for r in rows:
+                if r["ticker"] not in seen_tickers:
+                    seen_tickers.add(r["ticker"])
+                    unique_rows.append(r)
             sb.schema("market").from_("isx_companies").upsert(
-                rows, on_conflict="ticker"
+                unique_rows, on_conflict="ticker"
             ).execute()
-            upserted += len(rows)
+            upserted += len(unique_rows)
         if not data.get("next_page_url"):
             break
         page += 1
@@ -222,11 +229,11 @@ def isx_pdf_urls(html: str) -> list[str]:
 
 def isx_ingested_urls(sb) -> set[str]:
     res = sb.table("raw_data_records") \
-        .select("record_url") \
-        .not_("record_url", "is", None) \
-        .like("record_url", "%isx-iq.net%") \
+        .select("source_url") \
+        .filter("source_url", "not.is", "null") \
+        .like("source_url", "%isx-iq.net%") \
         .execute()
-    return {r["record_url"] for r in (res.data or [])}
+    return {r["source_url"] for r in (res.data or [])}
 
 
 # ---------------------------------------------------------------------------
@@ -414,28 +421,40 @@ def parse_isc_pdf(pdf_bytes: bytes, session_id: str, session_date: date) -> tupl
 
 _SOURCE_CACHE: dict[str, str] = {}
 
-def get_or_create_source(sb, handle: str, name: str, url: str) -> str:
-    if handle in _SOURCE_CACHE:
-        return _SOURCE_CACHE[handle]
-    res = sb.table("data_sources").select("id").eq("source_handle", handle).execute()
+def get_or_create_source(sb, name: str, url: str,
+                         source_type: str = "api",
+                         access_method: str = "api") -> str:
+    # source_name is the unique identifier (no source_handle column in this schema)
+    if name in _SOURCE_CACHE:
+        return _SOURCE_CACHE[name]
+    res = sb.table("data_sources").select("id").eq("source_name", name).execute()
     if res.data:
-        _SOURCE_CACHE[handle] = res.data[0]["id"]
+        _SOURCE_CACHE[name] = res.data[0]["id"]
         return res.data[0]["id"]
     ins = sb.table("data_sources").insert({
-        "source_handle": handle, "name": name, "source_url": url,
-        "content_type": "pdf", "licence": "public", "commercial_use": True,
+        "source_name":           name,
+        "base_url":              url,
+        "source_type":           source_type,    # must be: official/international/news/trade/investment/geospatial/private/primary_collection
+        "access_method":         access_method,  # must be: api/scrape/rss/manual_upload/pdf_download/partnership_feed/primary_collection
+        "licence_type":          "open-government",
+        "commercial_use_status": "allowed",
+        "update_frequency":      "daily",
+        "is_active":             True,
     }).execute()
-    _SOURCE_CACHE[handle] = ins.data[0]["id"]
+    _SOURCE_CACHE[name] = ins.data[0]["id"]
     return ins.data[0]["id"]
 
 
-def upsert_raw_record(sb, source_id: Optional[str], url: str,
-                      sha: str, size: int) -> str:
+def upsert_raw_record(sb, source_id: Optional[str], url: str, sha: str) -> str:
+    # on_conflict requires a unique constraint on content_hash — insert with ignore on dup
     res = sb.table("raw_data_records").upsert({
-        "source_id": source_id, "record_url": url, "content_hash": sha,
-        "content_type": "application/pdf", "content_size_bytes": size,
-        "fetched_at": datetime.utcnow().isoformat(),
-    }, on_conflict="content_hash").execute()
+        "source_id":        source_id,
+        "source_url":       url,
+        "content_hash":     sha,
+        "ingestion_method": "pdf",
+        "processing_status": "pending",
+        "date_ingested":    datetime.utcnow().isoformat(),
+    }, on_conflict="source_id,content_hash").execute()
     return res.data[0]["id"]
 
 
@@ -499,7 +518,7 @@ def process_isc_report(sb, report: dict, source_id: str,
         return False
 
     sha    = sha256_hex(pdf_bytes)
-    raw_id = upsert_raw_record(sb, source_id, url, sha, len(pdf_bytes))
+    raw_id = upsert_raw_record(sb, source_id, url, sha)
 
     if not has_text_layer(pdf_bytes):
         log.warning("No text layer — flagging ocr_fallback: %s", url)
@@ -519,15 +538,54 @@ def process_isc_report(sb, report: dict, source_id: str,
         return False
 
     if price_rows:
+        # Ensure all tickers exist in isx_companies (FK) — create stubs for unknowns
+        known = {r["ticker"] for r in
+                 (sb.schema("market").from_("isx_companies")
+                  .select("ticker").execute().data or [])}
+        stubs = [
+            {"ticker": r["ticker"], "name_ar": r.get("name_ar") or r["ticker"],
+             "is_active": True}
+            for r in price_rows if r["ticker"] not in known
+        ]
+        if stubs:
+            # Deduplicate stubs within this batch
+            seen: set[str] = set()
+            stubs = [s for s in stubs if not seen.__contains__(s["ticker"]) and not seen.add(s["ticker"])]  # type: ignore[func-returns-value]
+            log.info("Stubbing %d unknown tickers: %s",
+                     len(stubs), [s["ticker"] for s in stubs])
+            sb.schema("market").from_("isx_companies").upsert(
+                stubs, on_conflict="ticker"
+            ).execute()
+
+        # name_ar lives in isx_companies, not isx_daily_prices — strip before upsert
+        price_cols = [
+            "session_date", "session_id", "ticker", "prev_close", "close",
+            "change_pct", "shares_traded", "trade_value_iqd", "trade_count",
+            "is_most_active_value", "is_most_active_shares",
+        ]
+        def _cast(row: dict) -> dict:
+            out = {k: row[k] for k in price_cols if k in row}
+            for col in ("shares_traded", "trade_count"):
+                if out.get(col) is not None:
+                    out[col] = int(out[col])
+            return out
+        price_insert = [_cast(r) for r in price_rows]
         sb.schema("market").from_("isx_daily_prices").upsert(
-            price_rows, on_conflict="session_date,ticker"
+            price_insert, on_conflict="session_date,ticker"
         ).execute()
 
+    # Cast integer/bigint session fields — PDF parser returns floats from regex
+    int_session_cols = ("total_listed", "total_traded", "total_gainers",
+                        "total_losers", "total_stable", "total_shares", "total_trades")
+    cast_updates = {
+        k: int(v) if k in int_session_cols and v is not None else v
+        for k, v in session_updates.items()
+    }
     sb.schema("market").from_("isx_sessions").update({
         "status":    "parsed",
         "parsed_at": datetime.utcnow().isoformat(),
         "row_count": len(price_rows),
-        **session_updates,
+        **cast_updates,
     }).eq("id", session_id).execute()
 
     ingested_ids.add(isc_id)
@@ -556,7 +614,7 @@ def process_isx_file(sb, url: str, source_id: str,
         return False
 
     sha    = sha256_hex(pdf_bytes)
-    raw_id = upsert_raw_record(sb, source_id, url, sha, len(pdf_bytes))
+    raw_id = upsert_raw_record(sb, source_id, url, sha)
     # ISX bulletin parsing TBD — store raw record for now, parse once format confirmed
     log.info("ISX file stored (raw_record id=%s). Parser TBD.", raw_id)
     ingested_urls.add(url)
@@ -577,10 +635,12 @@ def run(dry_run: bool = False, backfill: int = 1,
         return
 
     isc_source_id = get_or_create_source(
-        sb, "ISC-daily", "Iraq Securities Commission — Daily Reports",
-        f"{ISC_API_BASE}/reports/daily")
+        sb, "Iraq Securities Commission — Daily Reports",
+        f"{ISC_API_BASE}/reports/daily",
+        source_type="official", access_method="api")
     isx_source_id = get_or_create_source(
-        sb, "ISX-bulletin", "Iraq Stock Exchange — Daily Bulletins", ISX_LISTING_URL)
+        sb, "Iraq Stock Exchange — Daily Bulletins", ISX_LISTING_URL,
+        source_type="official", access_method="scrape")
 
     # ---- ISC (API-first) ---------------------------------------------------
     all_reports  = isc_api_all_reports()
