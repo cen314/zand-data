@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grid Visualization (Leaflet)</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <style>
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+      }
+      #map {
+        height: 100vh;
+        width: 100%;
+      }
+      .info-panel {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: white;
+        padding: 15px;
+        border-radius: 5px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        z-index: 1000;
+        max-width: 320px;
+      }
+      .legend {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #ddd;
+      }
+      .legend-item {
+        display: flex;
+        align-items: center;
+        margin-bottom: 5px;
+      }
+      .legend-color {
+        width: 20px;
+        height: 20px;
+        margin-right: 10px;
+        border: 1px solid #333;
+      }
+      .controls {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #ddd;
+      }
+      .control-item {
+        margin-bottom: 5px;
+      }
+      input[type="checkbox"] {
+        margin-right: 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <div class="info-panel">
+      <h3 id="panel-title">Grid</h3>
+      <p><strong>Total Cells:</strong> <span id="total-cells">—</span></p>
+      <p><strong>Cell Size:</strong> <span id="cell-size">—</span></p>
+      <p><strong>Total Coverage:</strong> <span id="coverage">—</span></p>
+      <p><strong>Center:</strong> <span id="center-coords">—</span></p>
+
+      <div class="legend">
+        <h4>Legend</h4>
+        <div class="legend-item">
+          <div class="legend-color" style="background-color: #ff6b6b"></div>
+          <span>City Center (from JSON)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background-color: #4ecdc4"></div>
+          <span>Grid Centers</span>
+        </div>
+        <div class="legend-item">
+          <div
+            class="legend-color"
+            style="
+              background-color: rgba(74, 144, 226, 0.3);
+              border: 2px solid #4a90e2;
+            "
+          ></div>
+          <span>Grid Boundaries</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <h4>Controls</h4>
+        <div class="control-item">
+          <input type="checkbox" id="showCenters" checked />
+          <label for="showCenters">Show Grid Centers</label>
+        </div>
+        <div class="control-item">
+          <input type="checkbox" id="showBoundaries" checked />
+          <label for="showBoundaries">Show Grid Boundaries</label>
+        </div>
+        <div class="control-item">
+          <input type="checkbox" id="showLabels" checked />
+          <label for="showLabels">Show Grid Labels</label>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      // 🔧 Set your file name here:
+      const GRID_JSON_FILENAME = "grid_erbil.json";
+
+      // Init map
+      const map = L.map("map").setView([35.57, 45.35], 11);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap contributors",
+      }).addTo(map);
+
+      // Layer groups
+      const centerMarkersGroup = L.layerGroup().addTo(map);
+      const boundariesGroup = L.layerGroup().addTo(map);
+      const labelsGroup = L.layerGroup().addTo(map);
+
+      // UI helpers
+      function setPanel(meta) {
+        document.getElementById("panel-title").textContent = meta.title;
+        document.getElementById("total-cells").textContent = meta.totalCells;
+        document.getElementById("cell-size").textContent = meta.cellSize;
+        document.getElementById("coverage").textContent = meta.coverage;
+        document.getElementById("center-coords").textContent =
+          meta.centerCoords;
+      }
+
+      // Distance (approx) for center-cell detection (haversine-lite)
+      function distKm(aLat, aLng, bLat, bLng) {
+        const R = 6371;
+        const dLat = ((bLat - aLat) * Math.PI) / 180;
+        const dLng = ((bLng - aLng) * Math.PI) / 180;
+        const sLat = Math.sin(dLat / 2),
+          sLng = Math.sin(dLng / 2);
+        const aa =
+          sLat * sLat +
+          Math.cos((aLat * Math.PI) / 180) *
+            Math.cos((bLat * Math.PI) / 180) *
+            sLng *
+            sLng;
+        return 2 * R * Math.asin(Math.min(1, Math.sqrt(aa)));
+      }
+
+      // Render
+      fetch(GRID_JSON_FILENAME)
+        .then((r) => r.json())
+        .then((data) => displayGrid(data))
+        .catch((err) => {
+          console.error("Error loading grid data:", err);
+          alert(
+            `Error loading ${GRID_JSON_FILENAME}. Check the filename/path.`
+          );
+        });
+
+      function displayGrid(gridData) {
+        const cells = (gridData.grid_cells || []).filter(Boolean);
+        if (!cells.length) return;
+
+        // Panel values (fallbacks if missing)
+        const title = gridData.city || "Grid";
+        const dims = gridData.grid_info?.grid_dimensions || "—";
+        const wkm = gridData.grid_info?.grid_width_km ?? null;
+        const hkm = gridData.grid_info?.grid_height_km ?? null;
+        const cellSize =
+          gridData.grid_info?.cell_size_km != null
+            ? `${gridData.grid_info.cell_size_km} km²`
+            : "—";
+
+        setPanel({
+          title,
+          totalCells: cells.length,
+          cellSize,
+          coverage: wkm && hkm ? `${wkm} km × ${hkm} km (${dims})` : dims,
+          centerCoords: gridData.center_coordinates
+            ? `${gridData.center_coordinates.latitude.toFixed(
+                6
+              )}°, ${gridData.center_coordinates.longitude.toFixed(6)}°`
+            : "—",
+        });
+
+        // Determine the present "center cell" = closest to JSON center_coordinates
+        let centerCellLabel = null;
+        if (gridData.center_coordinates) {
+          const { latitude: CLat, longitude: CLng } =
+            gridData.center_coordinates;
+          let best = { label: null, d: Infinity };
+          for (const c of cells) {
+            const d = distKm(CLat, CLng, c.center.latitude, c.center.longitude);
+            if (d < best.d) best = { label: c.label, d };
+          }
+          centerCellLabel = best.label; // might be null if no cells (handled above)
+        }
+
+        // Draw each present cell
+        for (const cell of cells) {
+          const { latitude: lat, longitude: lon } = cell.center;
+          const isCenterCell =
+            centerCellLabel && cell.label === centerCellLabel;
+
+          // center marker
+          const centerMarker = L.circleMarker([lat, lon], {
+            radius: isCenterCell ? 8 : 4,
+            fillColor: isCenterCell ? "#ff6b6b" : "#4ecdc4",
+            color: isCenterCell ? "#d63031" : "#00b894",
+            weight: 2,
+            opacity: 1,
+            fillOpacity: 0.85,
+          });
+
+          const popup = `
+          <div>
+            <h4>Grid Cell ${cell.label ?? "—"}</h4>
+            <p><strong>Center:</strong> ${lat.toFixed(6)}, ${lon.toFixed(6)}</p>
+            <p><strong>Row:</strong> ${
+              cell.row ?? "—"
+            }, <strong>Column:</strong> ${cell.column ?? "—"}</p>
+            ${
+              cell.distance_from_center_km != null
+                ? `<p><strong>Distance from grid center:</strong> ${cell.distance_from_center_km} km</p>`
+                : ""
+            }
+            ${
+              cell.area_km2 != null
+                ? `<p><strong>Area:</strong> ${cell.area_km2} km²</p>`
+                : ""
+            }
+            ${
+              isCenterCell
+                ? "<p><strong>🎯 NEAREST TO CITY CENTER</strong></p>"
+                : ""
+            }
+          </div>`;
+
+          centerMarker.bindPopup(popup);
+          centerMarkersGroup.addLayer(centerMarker);
+
+          // boundary rectangle (skip if boundaries missing)
+          const b = cell.boundaries;
+          if (
+            b &&
+            [b.south, b.west, b.north, b.east].every(
+              (v) => typeof v === "number"
+            )
+          ) {
+            const rect = L.rectangle(
+              [
+                [b.south, b.west],
+                [b.north, b.east],
+              ],
+              {
+                color: "#4a90e2",
+                weight: 1,
+                opacity: 0.6,
+                fillColor: "#4a90e2",
+                fillOpacity: 0.1,
+              }
+            );
+            rect.bindPopup(popup);
+            boundariesGroup.addLayer(rect);
+          }
+
+          // label
+          const labelText = cell.label ?? "";
+          const labelMarker = L.marker([lat, lon], {
+            icon: L.divIcon({
+              className: "grid-label",
+              html: `<div style="
+              background: ${
+                isCenterCell
+                  ? "rgba(255,107,107,0.9)"
+                  : "rgba(255,255,255,0.85)"
+              };
+              color: ${isCenterCell ? "white" : "#333"};
+              border: 1px solid ${isCenterCell ? "#ff6b6b" : "#333"};
+              border-radius: 3px; padding: 2px 4px; font-size: 12px; font-weight: bold;
+              white-space: nowrap; text-align:center;">${labelText}</div>`,
+              iconSize: [30, 20],
+              iconAnchor: [15, 10],
+            }),
+          });
+          labelsGroup.addLayer(labelMarker);
+        }
+
+        // City center star (from JSON, not tied to any specific cell label)
+        if (gridData.center_coordinates) {
+          const { latitude, longitude } = gridData.center_coordinates;
+          const cityCenter = L.marker([latitude, longitude], {
+            icon: L.divIcon({
+              className: "city-center-marker",
+              html: '<div style="background:#ff6b6b;color:white;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-weight:bold;border:2px solid white;box-shadow:0 2px 4px rgba(0,0,0,0.3);">★</div>',
+              iconSize: [20, 20],
+              iconAnchor: [10, 10],
+            }),
+          }).addTo(map);
+          cityCenter.bindPopup(
+            `<div><h4>🏙️ City Center</h4><p>${latitude.toFixed(
+              6
+            )}°, ${longitude.toFixed(6)}°</p></div>`
+          );
+        }
+
+        // Compute overall bounds from present rectangles (no index assumptions)
+        const boundsList = [];
+        boundariesGroup.eachLayer((layer) => {
+          if (layer.getBounds) boundsList.push(layer.getBounds());
+        });
+
+        if (boundsList.length) {
+          // Merge all bounds
+          let merged = boundsList[0];
+          for (let i = 1; i < boundsList.length; i++)
+            merged = merged.extend(boundsList[i]);
+          // Draw dashed envelope for the shown cells
+          const gridBoundary = L.rectangle(merged, {
+            color: "#e74c3c",
+            weight: 3,
+            opacity: 1,
+            fillOpacity: 0,
+            dashArray: "10,5",
+          }).addTo(map);
+          gridBoundary.bindPopup(
+            "<div><h4>🗺️ Grid Envelope</h4><p>Envelope of currently included cells</p></div>"
+          );
+
+          // Fit the map to what actually exists
+          map.fitBounds(merged, { padding: [20, 20] });
+        }
+      }
+
+      // Checkbox handlers
+      document.getElementById("showCenters").addEventListener("change", (e) => {
+        e.target.checked
+          ? map.addLayer(centerMarkersGroup)
+          : map.removeLayer(centerMarkersGroup);
+      });
+      document
+        .getElementById("showBoundaries")
+        .addEventListener("change", (e) => {
+          e.target.checked
+            ? map.addLayer(boundariesGroup)
+            : map.removeLayer(boundariesGroup);
+        });
+      document.getElementById("showLabels").addEventListener("change", (e) => {
+        e.target.checked
+          ? map.addLayer(labelsGroup)
+          : map.removeLayer(labelsGroup);
+      });
+
+      // Coords readout
+      const coordsDisplay = L.control({ position: "bottomleft" });
+      coordsDisplay.onAdd = function () {
+        const div = L.DomUtil.create("div", "coords-display");
+        div.style.background = "rgba(255,255,255,0.8)";
+        div.style.padding = "5px";
+        div.style.borderRadius = "3px";
+        div.style.fontSize = "12px";
+        div.innerHTML = "Move mouse to see coordinates";
+        return div;
+      };
+      coordsDisplay.addTo(map);
+
+      map.on("mousemove", (e) => {
+        const { lat, lng } = e.latlng;
+        document.querySelector(
+          ".coords-display"
+        ).innerHTML = `Lat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)}`;
+      });
+    </script>
+  </body>
+</html>

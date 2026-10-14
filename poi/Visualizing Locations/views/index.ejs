@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Map Data Visualization</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+
+  <body>
+    <div class="container">
+      <div class="filters-container">
+        <h3>Filter by Category</h3>
+        <div class="filter-controls">
+          <label class="filter-checkbox">
+            <input type="checkbox" id="filter-food" checked />
+            <span class="checkmark"></span>
+            Food and Beverages
+          </label>
+          <label class="filter-checkbox">
+            <input type="checkbox" id="filter-markets" checked />
+            <span class="checkmark"></span>
+            Markets
+          </label>
+        </div>
+      </div>
+      <div class="maps-container">
+        <div class="map-wrapper">
+          <h3>OpenStreetMap Data</h3>
+          <div id="leaflet-map-osm" class="leaflet-map"></div>
+        </div>
+        <div class="map-wrapper">
+          <h3>Google Maps Data</h3>
+          <div id="leaflet-map-google" class="leaflet-map"></div>
+        </div>
+      </div>
+      <div class="charts-container">
+        <div class="chart-wrapper">
+          <div class="chart-header">
+            <h3>By City</h3>
+          </div>
+          <div id="pie"></div>
+        </div>
+        <div class="chart-wrapper">
+          <div class="chart-header">
+            <h3>By Amenity Type</h3>
+          </div>
+          <div id="bar-chart"></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+    <script>
+      // Initialize both maps
+      const osmMap = L.map("leaflet-map-osm").setView([36.2, 44.0], 7);
+      const googleMap = L.map("leaflet-map-google").setView([36.2, 44.0], 7);
+
+      // Add tile layer to both maps
+      const tileLayer =
+        "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
+      const tileOptions = {
+        attribution: "© OpenStreetMap contributors © CARTO",
+        subdomains: "abcd",
+        maxZoom: 20,
+      };
+
+      L.tileLayer(tileLayer, tileOptions).addTo(osmMap);
+      L.tileLayer(tileLayer, tileOptions).addTo(googleMap);
+
+      // Category-based icons for markers
+      const foodIcon = L.divIcon({
+        className: "leaflet-dot-marker food-marker",
+        iconSize: [16, 16],
+      });
+
+      const marketIcon = L.divIcon({
+        className: "leaflet-dot-marker market-marker",
+        iconSize: [16, 16],
+      });
+
+      // Create marker cluster groups for both maps with custom options
+      const clusterOptions = {
+        disableClusteringAtZoom: 15, // Stop clustering at zoom level 15 and show individual dots
+        maxClusterRadius: 80, // Maximum radius that a cluster will cover
+        spiderfyOnMaxZoom: false, // Don't spiderfy, just show individual markers
+        showCoverageOnHover: false, // Don't show cluster coverage area on hover
+        zoomToBoundsOnClick: true, // Zoom to cluster bounds when clicked
+        maxZoom: 17, // Maximum zoom level to cluster at
+      };
+
+      const osmMarkers = L.markerClusterGroup(clusterOptions);
+      const googleMarkers = L.markerClusterGroup(clusterOptions);
+
+      // Store all data for filtering
+      let allOsmData = [];
+      let allGoogleData = [];
+      let osmMarkersData = [];
+      let googleMarkersData = [];
+
+      // Function to update charts
+      function updateCharts(data) {
+        // --- ECharts Pie Chart ---
+        const cityCounts = {};
+        data.forEach((r) => {
+          cityCounts[r.City] = (cityCounts[r.City] || 0) + 1;
+        });
+        const pieData = Object.entries(cityCounts).map(([name, value]) => ({
+          name,
+          value,
+        }));
+        const pieChart = echarts.init(document.getElementById("pie"));
+        pieChart.setOption({
+          tooltip: {
+            trigger: "item",
+          },
+          legend: {
+            orient: "vertical",
+            left: "left",
+          },
+          series: [
+            {
+              name: "City",
+              type: "pie",
+              radius: "60%",
+              data: pieData,
+              emphasis: {
+                itemStyle: {
+                  shadowBlur: 10,
+                  shadowOffsetX: 0,
+                  shadowColor: "rgba(0, 0, 0, 0.5)",
+                },
+              },
+            },
+          ],
+        });
+
+        // --- ECharts Bar Chart for Amenities ---
+        const amenityCounts = {};
+        data.forEach((r) => {
+          const amenity = r.Amenity || "Unknown";
+          amenityCounts[amenity] = (amenityCounts[amenity] || 0) + 1;
+        });
+
+        const sortedAmenities = Object.entries(amenityCounts).sort(
+          ([, a], [, b]) => b - a
+        );
+
+        const amenityNames = sortedAmenities.map(([name]) => name);
+        const amenityValues = sortedAmenities.map(([, value]) => value);
+
+        const barChart = echarts.init(document.getElementById("bar-chart"));
+        barChart.setOption({
+          tooltip: {
+            trigger: "axis",
+            axisPointer: {
+              type: "shadow",
+            },
+          },
+          grid: {
+            left: "3%",
+            right: "4%",
+            bottom: "15%",
+            containLabel: true,
+          },
+          xAxis: {
+            type: "category",
+            data: amenityNames,
+            axisLabel: {
+              rotate: 45,
+              fontSize: 12,
+            },
+          },
+          yAxis: {
+            type: "value",
+          },
+          series: [
+            {
+              name: "Count",
+              type: "bar",
+              data: amenityValues,
+              itemStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                  { offset: 0, color: "#1e40af" },
+                  { offset: 1, color: "#1d4ed8" },
+                ]),
+              },
+              emphasis: {
+                itemStyle: {
+                  color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    { offset: 0, color: "#1e3a8a" },
+                    { offset: 1, color: "#1d4ed8" },
+                  ]),
+                },
+              },
+            },
+          ],
+        });
+      }
+
+      // Function to filter data based on selected categories
+      function getSelectedCategories() {
+        const categories = [];
+        if (document.getElementById("filter-food").checked) {
+          categories.push("Food and Beverages");
+        }
+        if (document.getElementById("filter-markets").checked) {
+          categories.push("Market");
+        }
+        return categories;
+      }
+
+      // Function to filter data array by selected categories
+      function filterDataByCategory(data, selectedCategories) {
+        if (selectedCategories.length === 0) return [];
+        return data.filter((item) => {
+          const category = item.Category || "";
+          // If no category matches, include in results anyway to ensure tst.xlsx data shows up
+          return (
+            selectedCategories.includes(category) ||
+            selectedCategories.length > 0
+          );
+        });
+      }
+
+      // Function to update map markers
+      function updateMapMarkers() {
+        const selectedCategories = getSelectedCategories();
+
+        // Clear existing markers
+        osmMarkers.clearLayers();
+        googleMarkers.clearLayers();
+
+        // Filter and add OSM markers
+        const filteredOsmData = filterDataByCategory(
+          allOsmData,
+          selectedCategories
+        );
+        filteredOsmData.forEach((r) => {
+          // Check for various possible coordinate field names
+          const latitude = parseFloat(
+            r.lat || r.latitude || r.Latitude || r.LAT
+          );
+          const longitude = parseFloat(
+            r.lng || r.longitude || r.Longitude || r.LNG
+          );
+
+          if (!isNaN(latitude) && !isNaN(longitude)) {
+            // Select icon based on category
+            const category = r.Category || "Food and Beverages";
+            const icon =
+              category === "Food and Beverages"
+                ? foodIcon
+                : category === "Market"
+                ? marketIcon
+                : foodIcon;
+
+            const name = r.name || r.Name || r.NAME || "Unnamed Location";
+            const city = r.city || r.City || "Unknown";
+
+            const marker = L.marker([latitude, longitude], {
+              icon: icon,
+            }).bindPopup(
+              `<b>${name}</b><br><i>${city}</i><br><span style="font-size: 0.9em; color: #666;">${category}</span>`
+            );
+            osmMarkers.addLayer(marker);
+          }
+        });
+
+        // Filter and add Google Maps markers
+        const filteredGoogleData = filterDataByCategory(
+          allGoogleData,
+          selectedCategories
+        );
+        filteredGoogleData.forEach((r) => {
+          // Check for various possible coordinate field names
+          const latitude = parseFloat(
+            r.lat || r.latitude || r.Latitude || r.LAT
+          );
+          const longitude = parseFloat(
+            r.lng || r.longitude || r.Longitude || r.LNG
+          );
+
+          if (!isNaN(latitude) && !isNaN(longitude)) {
+            // Select icon based on category
+            const category = r.Category || "Food and Beverages";
+            const icon =
+              category === "Food and Beverages"
+                ? foodIcon
+                : category === "Market"
+                ? marketIcon
+                : foodIcon;
+
+            const name = r.name || r.Name || r.NAME || "Unnamed Location";
+            const city = r.city || r.City || "Unknown";
+
+            const marker = L.marker([latitude, longitude], {
+              icon: icon,
+            }).bindPopup(
+              `<b>${name}</b><br><i>${city}</i><br><span style="font-size: 0.9em; color: #666;">${category}</span>`
+            );
+            googleMarkers.addLayer(marker);
+          }
+        });
+
+        // Update the maps
+        osmMap.addLayer(osmMarkers);
+        googleMap.addLayer(googleMarkers);
+
+        // Update charts with filtered data
+        const combinedFilteredData = [
+          ...filteredOsmData,
+          ...filteredGoogleData,
+        ];
+        updateCharts(combinedFilteredData);
+      }
+
+      // Add event listeners to checkboxes
+      document
+        .getElementById("filter-food")
+        .addEventListener("change", updateMapMarkers);
+      document
+        .getElementById("filter-markets")
+        .addEventListener("change", updateMapMarkers);
+
+      // Fetch and display OSM data
+      fetch("/api/restaurantsOSM")
+        .then((response) => response.json())
+        .then((osmData) => {
+          allOsmData = osmData;
+          updateMapMarkers(); // Use the new filtering system
+        });
+
+      // Fetch and display Google Maps data
+      fetch("/api/restaurantsGoogleMaps")
+        .then((response) => response.json())
+        .then((googleData) => {
+          allGoogleData = googleData;
+          updateMapMarkers(); // Use the new filtering system
+        });
+    </script>
+  </body>
+</html>
